@@ -77,7 +77,7 @@ async def validate_email(req: EmailRequest) -> ValidationResult:
             score = 0.0
     
     return ValidationResult(
-        valid=score >= 0.8,
+        valid=score >= 0.7,
         score=round(score, 2),
         checks=checks
     )
