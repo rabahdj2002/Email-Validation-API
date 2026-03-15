@@ -30,7 +30,6 @@ class ValidationResult(BaseModel):
 async def ping():
     return {"status": "ok", "version": "1.0.0", "timestamp": datetime.utcnow().isoformat()}
 
-# Root endpoint - serve README
 @app.get("/", response_class=HTMLResponse)
 async def root():
     readme_html = """
@@ -118,7 +117,6 @@ async def root():
     """
     return HTMLResponse(content=readme_html, status_code=200)
 
-# Disposable domains (top 20)
 DISPOSABLE_DOMAINS = {
     "yopmail.com", "tempmail.org", "guerrillamail.com", "10minutemail.com",
     "mailinator.com", "sharklasers.com", "getnada.com", "33mail.com"
