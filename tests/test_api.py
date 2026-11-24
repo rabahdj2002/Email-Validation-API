@@ -125,6 +125,11 @@ def test_resolve_mx_handles_dns_errors(monkeypatch):
     assert main.resolve_mx("missing.example") == []
 
 
+@pytest.fixture
+def public_hosts(monkeypatch):
+    monkeypatch.setattr(main, "public_address", lambda host: host)
+
+
 class FakeSMTP:
     reachable = {"mx2.example.com", "picky.example.com"}
 
@@ -149,17 +154,28 @@ class FakeSMTP:
         return 250, b"OK"
 
 
-def test_smtp_check_falls_back_to_next_mx(monkeypatch):
+def test_smtp_check_falls_back_to_next_mx(monkeypatch, public_hosts):
     monkeypatch.setattr(smtplib, "SMTP", FakeSMTP)
     assert main.smtp_check("ana@example.com", ["mx1.example.com", "mx2.example.com"]) == "250"
 
 
-def test_smtp_check_reports_unavailable_instead_of_rejected(monkeypatch):
+def test_smtp_check_reports_unavailable_instead_of_rejected(monkeypatch, public_hosts):
     monkeypatch.setattr(smtplib, "SMTP", FakeSMTP)
     assert main.smtp_check("ana@example.com", ["mx1.example.com"]) == main.SMTP_UNAVAILABLE
 
 
-def test_smtp_check_ignores_server_that_refuses_sender(monkeypatch):
+def test_smtp_check_ignores_server_that_refuses_sender(monkeypatch, public_hosts):
     monkeypatch.setattr(smtplib, "SMTP", FakeSMTP)
     assert main.smtp_check("ana@example.com", ["picky.example.com"]) == main.SMTP_UNAVAILABLE
     assert main.smtp_check("ana@example.com", ["picky.example.com", "mx2.example.com"]) == "250"
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "10.0.0.5", "192.168.1.10", "169.254.169.254", "::1"])
+def test_private_mx_hosts_are_never_contacted(monkeypatch, host):
+    monkeypatch.setattr(smtplib, "SMTP", lambda *a, **k: pytest.fail("connected to a private host"))
+    assert main.public_address(host) is None
+    assert main.smtp_check("ana@example.com", [host]) == main.SMTP_UNAVAILABLE
+
+
+def test_public_address_allows_public_ip():
+    assert main.public_address("8.8.8.8") == "8.8.8.8"
