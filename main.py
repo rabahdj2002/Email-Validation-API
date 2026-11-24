@@ -1,23 +1,35 @@
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
-from pydantic import BaseModel, EmailStr, Field
-from typing import Optional, List, Dict, Any, List
-import re
-import dns.resolver
+import difflib
+import ipaddress
+import os
 import smtplib
-from datetime import datetime
+import socket
+from datetime import datetime, timezone
+from typing import List, Literal, Optional
+
+import dns.exception
+import dns.resolver
+from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
+from email_validator import EmailNotValidError
+from email_validator import validate_email as parse_email
+from pydantic import BaseModel, EmailStr, Field
+
+DNS_TIMEOUT_SECONDS = float(os.getenv("DNS_TIMEOUT_SECONDS", "3"))
+SMTP_TIMEOUT_SECONDS = float(os.getenv("SMTP_TIMEOUT_SECONDS", "10"))
+SMTP_HELO_HOST = os.getenv("SMTP_HELO_HOST", "email-validation-api.local")
+SMTP_UNAVAILABLE = "unavailable"
 
 
-app = FastAPI(title="Email Validation API", version="1.0.0")
+app = FastAPI(title="Email Validation API", version="1.1.0")
 
 class EmailRequest(BaseModel):
     email: EmailStr = Field(..., description="Email to validate")
-    depth: Optional[str] = Field("basic", description="Validation depth: 'basic' or 'full'")
+    depth: Literal["basic", "full"] = Field("basic", description="'basic' (syntax, MX, disposable) or 'full' (adds SMTP)")
 
 class ValidationChecks(BaseModel):
     syntax: bool
     mx: List[str] = Field(default_factory=list)
-    smtp: Optional[str] = None
+    smtp: Optional[str] = Field(None, description="SMTP RCPT reply code, or 'unavailable' if no mail server could be reached")
     disposable: bool = False
 
 class ValidationResult(BaseModel):
@@ -28,7 +40,7 @@ class ValidationResult(BaseModel):
 
 @app.get("/ping")
 async def ping():
-    return {"status": "ok", "version": "1.0.0", "timestamp": datetime.utcnow().isoformat()}
+    return {"status": "ok", "version": app.version, "timestamp": datetime.now(timezone.utc).isoformat()}
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
@@ -66,29 +78,13 @@ async def root():
 <body>
     <div class="header">
         <h1>Email Validation API 🚀</h1>
-        <p><span class="badge live">Status: Live</span>  <span class="badge fastapi">FastAPI 0.115</span> | Built by <strong>Rabah Djebbes</strong> - Automation Engineering</p>
+        <p><span class="badge fastapi">FastAPI</span> | Built by <strong>Rabah Djebbes</strong> - Automation Engineering</p>
     </div>
 
     <h2>✨ API Endpoints</h2>
     <div class="endpoint">
         <h3>📖 Interactive Docs: <a href="/docs">/docs</a></h3>
         <h3>🔍 Health Check: <a href="/ping">/ping</a></h3>
-    </div>
-
-    <h2>⚡ Performance</h2>
-    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1rem;">
-        <div class="feature">
-            <div class="metric">200-800 req/sec</div>
-            <div>Basic Mode</div>
-        </div>
-        <div class="feature">
-            <div class="metric">25ms avg</div>
-            <div>Latency</div>
-        </div>
-        <div class="feature">
-            <div class="metric">99.9%</div>
-            <div>Uptime</div>
-        </div>
     </div>
 
     <h2>✅ Features</h2>
@@ -98,7 +94,7 @@ async def root():
         <div class="feature">✅ SMTP Verify</div>
         <div class="feature">✅ Disposable Block</div>
         <div class="feature">✅ Confidence Score</div>
-        <div class="feature">✅ Rate Limited</div>
+        <div class="feature">✅ Typo Suggestions</div>
     </div>
 
     <h2>🧪 Test Results</h2>
@@ -110,7 +106,7 @@ async def root():
     </table>
 
     <footer>
-        <p>⭐ <strong>Deployed March 2026</strong> | <a href="/docs">Swagger UI</a> | Made with ❤️ by Rabah Djebbes</p>
+        <p><a href="/docs">Swagger UI</a> | <a href="https://github.com/rabahdj2002/Email-Validation-API">Source on GitHub</a> | Made by Rabah Djebbes</p>
     </footer>
 </body>
 </html>
@@ -119,72 +115,114 @@ async def root():
 
 DISPOSABLE_DOMAINS = {
     "yopmail.com", "tempmail.org", "guerrillamail.com", "10minutemail.com",
-    "mailinator.com", "sharklasers.com", "getnada.com", "33mail.com"
+    "mailinator.com", "sharklasers.com", "getnada.com", "33mail.com",
+    "temp-mail.org", "trashmail.com", "maildrop.cc", "dispostable.com",
+    "throwawaymail.com", "fakeinbox.com", "mintemail.com", "mohmal.com",
+    "emailondeck.com", "tempail.com", "burnermail.io", "spamgourmet.com",
 }
 
-async def smtp_check(email: str, mx_servers: List[str]) -> str:
-    """Perform SMTP verification"""
+COMMON_DOMAINS = [
+    "gmail.com", "yahoo.com", "outlook.com", "hotmail.com", "icloud.com",
+    "live.com", "aol.com", "proton.me", "protonmail.com", "yandex.com", "gmx.com", "mail.com",
+]
+
+
+def suggest_domain(domain: str) -> Optional[str]:
+    """Closest well-known domain for a likely typo, e.g. 'gmial.com' -> 'gmail.com'."""
+    if domain in COMMON_DOMAINS:
+        return None
+    match = difflib.get_close_matches(domain, COMMON_DOMAINS, n=1, cutoff=0.8)
+    return match[0] if match else None
+
+
+def resolve_mx(domain: str) -> List[str]:
+    """MX hosts ordered by preference; empty if the domain has none or DNS fails."""
+    resolver = dns.resolver.Resolver()
+    resolver.lifetime = DNS_TIMEOUT_SECONDS
     try:
-        domain = email.split('@')[1]
-        mx = dns.resolver.resolve(domain, 'MX')
-        mx_server = str(mx[0].exchange)
-        
-        server = smtplib.SMTP(timeout=10)
-        server.set_debuglevel(0)
-        server.connect(mx_server, 25)
-        server.helo("localhost")
-        server.mail("test@localhost")
-        code, _ = server.rcpt(email)
-        server.quit()
-        return str(code)
-    except:
-        return "550"
+        answers = resolver.resolve(domain, "MX")
+    except (dns.exception.DNSException, OSError):
+        return []
+    records = sorted(answers, key=lambda r: r.preference)
+    return [str(r.exchange).rstrip(".") for r in records if str(r.exchange) not in (".", "")]
+
+
+def public_addresses(host: str) -> List[str]:
+    """IPs for host; empty if it does not resolve or any address is private, loopback or reserved."""
+    try:
+        infos = socket.getaddrinfo(host, 25, type=socket.SOCK_STREAM)
+    except (OSError, UnicodeError):
+        return []
+    addresses = list(dict.fromkeys(info[4][0] for info in infos))
+    if not all(ipaddress.ip_address(a.split("%")[0]).is_global for a in addresses):
+        return []
+    return addresses
+
+
+def _rcpt_code(address: str, email: str) -> Optional[str]:
+    """RCPT TO reply code from one server, or None if it was unreachable or refused our sender."""
+    try:
+        with smtplib.SMTP(address, 25, timeout=SMTP_TIMEOUT_SECONDS) as server:
+            server.helo(SMTP_HELO_HOST)
+            mail_code, _ = server.mail(f"verify@{SMTP_HELO_HOST}")
+            if not 200 <= mail_code < 300:
+                return None
+            code, _ = server.rcpt(email)
+            return str(code)
+    except (smtplib.SMTPException, socket.timeout, OSError):
+        return None
+
+
+def smtp_check(email: str, mx_hosts: List[str]) -> str:
+    """RCPT TO reply code from the first reachable MX host, or 'unavailable'."""
+    for host in mx_hosts:
+        # MX hosts are chosen by whoever owns the domain; never let them point us at internal services.
+        for address in public_addresses(host):
+            code = _rcpt_code(address, email)
+            if code:
+                return code
+    return SMTP_UNAVAILABLE
+
 
 @app.post("/validate", response_model=ValidationResult, summary="Validate Email")
-async def validate_email(request: EmailRequest):
+def validate_email(request: EmailRequest):
+    # Sync on purpose: FastAPI runs it in a worker thread, so slow DNS/SMTP never blocks other requests.
     email = request.email
-    depth = request.depth or "basic"
-    
-    # Initialize checks
-    checks = {"syntax": False, "mx": [], "disposable": False, "smtp": None}
-    score = 0.0
-    
-    # 1. Syntax check
-    if re.match(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$", email):
-        checks["syntax"] = True
-        score += 0.4
-    
-    # 2. MX records
+    domain = email.rsplit("@", 1)[1].lower()
+    checks = ValidationChecks(syntax=True)  # EmailStr already rejected bad syntax with HTTP 422
+    score = 0.4
     try:
-        mx_records = [str(r.exchange) for r in dns.resolver.resolve(email.split('@')[1], 'MX')]
-        checks["mx"] = mx_records
-        if mx_records:
-            score += 0.4
-    except:
-        checks["mx"] = []
-    
-    # 3. Disposable check
-    domain = email.split('@')[1].lower()
-    if domain in DISPOSABLE_DOMAINS:
-        checks["disposable"] = True
-        score = 0.0
-    
-    # 4. SMTP check (full mode only)
-    if depth == "full" and checks["mx"]:
-        checks["smtp"] = await smtp_check(email, checks["mx"])
-        if checks["smtp"] == "250":
+        parsed = parse_email(email, check_deliverability=False)
+        ascii_domain, ascii_email = parsed.ascii_domain, parsed.ascii_email
+    except EmailNotValidError:
+        ascii_domain, ascii_email = domain, None
+
+    # DNS and SMTP need the IDNA (punycode) form, e.g. gießen.de -> xn--gieen-nqa.de
+    checks.mx = resolve_mx(ascii_domain)
+    if checks.mx:
+        score += 0.4
+
+    checks.disposable = domain in DISPOSABLE_DOMAINS
+
+    if request.depth == "full" and checks.mx and not checks.disposable:
+        # A non-ASCII mailbox name needs SMTPUTF8, which this check does not speak.
+        checks.smtp = smtp_check(ascii_email, checks.mx) if ascii_email else SMTP_UNAVAILABLE
+        if checks.smtp.startswith("2"):
             score += 0.2
-    
-    # Final result
-    valid = score >= 0.6
-    
+        elif checks.smtp.startswith("5"):
+            score = min(score, 0.4)  # the mail server rejected this mailbox
+
+    if checks.disposable:
+        score = 0.0
+
     return ValidationResult(
-        valid=valid,
+        valid=score >= 0.6,
         score=round(score, 2),
         checks=checks,
-        suggestion=None
+        suggestion=None if checks.disposable else suggest_domain(domain),
     )
+
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8001")))

@@ -1,0 +1,7 @@
+# Free hosting on Render: New > Blueprint > pick this repo.
+services:
+  - type: web
+    name: email-validation-api
+    runtime: docker
+    plan: free
+    healthCheckPath: /ping
