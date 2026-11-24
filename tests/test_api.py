@@ -92,6 +92,20 @@ def test_disposable_scores_zero_even_in_full_mode(dns_records, smtp_reply):
     assert body["suggestion"] is None
 
 
+def test_international_domain_is_looked_up_in_punycode(dns_records, smtp_reply):
+    dns_records["xn--gieen-nqa.de"] = ["mx.xn--gieen-nqa.de"]
+    dns_records["giessen.de"] = ["mx.giessen.de"]
+    body = validate("ana@gießen.de", "full").json()
+    assert body["checks"]["mx"] == ["mx.xn--gieen-nqa.de"] and body["checks"]["smtp"] == "250"
+
+
+def test_non_ascii_mailbox_skips_smtp(dns_records, smtp_reply):
+    dns_records["example.com"] = ["mx1.example.com"]
+    body = validate("jösé@example.com", "full").json()
+    assert body["checks"]["smtp"] == main.SMTP_UNAVAILABLE and body["valid"] is True
+    assert smtp_reply["calls"] == 0
+
+
 def test_typo_suggestion(dns_records):
     assert validate("ana@gmial.com").json()["suggestion"] == "gmail.com"
     dns_records["gmail.com"] = ["gmail-smtp-in.l.google.com"]

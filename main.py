@@ -9,6 +9,8 @@ import dns.exception
 import dns.resolver
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
+from email_validator import EmailNotValidError
+from email_validator import validate_email as parse_email
 from pydantic import BaseModel, EmailStr, Field
 
 DNS_TIMEOUT_SECONDS = float(os.getenv("DNS_TIMEOUT_SECONDS", "3"))
@@ -165,15 +167,22 @@ def validate_email(request: EmailRequest):
     domain = email.rsplit("@", 1)[1].lower()
     checks = ValidationChecks(syntax=True)  # EmailStr already rejected bad syntax with HTTP 422
     score = 0.4
+    try:
+        parsed = parse_email(email, check_deliverability=False)
+        ascii_domain, ascii_email = parsed.ascii_domain, parsed.ascii_email
+    except EmailNotValidError:
+        ascii_domain, ascii_email = domain, None
 
-    checks.mx = resolve_mx(domain)
+    # DNS and SMTP need the IDNA (punycode) form, e.g. gießen.de -> xn--gieen-nqa.de
+    checks.mx = resolve_mx(ascii_domain)
     if checks.mx:
         score += 0.4
 
     checks.disposable = domain in DISPOSABLE_DOMAINS
 
     if request.depth == "full" and checks.mx and not checks.disposable:
-        checks.smtp = smtp_check(email, checks.mx)
+        # A non-ASCII mailbox name needs SMTPUTF8, which this check does not speak.
+        checks.smtp = smtp_check(ascii_email, checks.mx) if ascii_email else SMTP_UNAVAILABLE
         if checks.smtp.startswith("2"):
             score += 0.2
         elif checks.smtp.startswith("5"):
