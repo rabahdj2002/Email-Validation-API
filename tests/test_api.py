@@ -126,11 +126,12 @@ def test_resolve_mx_handles_dns_errors(monkeypatch):
 
 
 class FakeSMTP:
-    reachable = {"mx2.example.com"}
+    reachable = {"mx2.example.com", "picky.example.com"}
 
     def __init__(self, host, port, timeout):
         if host not in self.reachable:
             raise OSError("connection refused")
+        self.host = host
 
     def __enter__(self):
         return self
@@ -142,7 +143,7 @@ class FakeSMTP:
         pass
 
     def mail(self, sender):
-        pass
+        return (550, b"sender rejected") if self.host == "picky.example.com" else (250, b"OK")
 
     def rcpt(self, email):
         return 250, b"OK"
@@ -156,3 +157,9 @@ def test_smtp_check_falls_back_to_next_mx(monkeypatch):
 def test_smtp_check_reports_unavailable_instead_of_rejected(monkeypatch):
     monkeypatch.setattr(smtplib, "SMTP", FakeSMTP)
     assert main.smtp_check("ana@example.com", ["mx1.example.com"]) == main.SMTP_UNAVAILABLE
+
+
+def test_smtp_check_ignores_server_that_refuses_sender(monkeypatch):
+    monkeypatch.setattr(smtplib, "SMTP", FakeSMTP)
+    assert main.smtp_check("ana@example.com", ["picky.example.com"]) == main.SMTP_UNAVAILABLE
+    assert main.smtp_check("ana@example.com", ["picky.example.com", "mx2.example.com"]) == "250"

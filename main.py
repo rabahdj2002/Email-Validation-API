@@ -152,7 +152,9 @@ def smtp_check(email: str, mx_hosts: List[str]) -> str:
         try:
             with smtplib.SMTP(host, 25, timeout=SMTP_TIMEOUT_SECONDS) as server:
                 server.helo(SMTP_HELO_HOST)
-                server.mail(f"verify@{SMTP_HELO_HOST}")
+                mail_code, _ = server.mail(f"verify@{SMTP_HELO_HOST}")
+                if not 200 <= mail_code < 300:
+                    continue  # the server refused us, not the mailbox
                 code, _ = server.rcpt(email)
                 return str(code)
         except (smtplib.SMTPException, socket.timeout, OSError):
