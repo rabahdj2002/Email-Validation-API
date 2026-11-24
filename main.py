@@ -147,35 +147,40 @@ def resolve_mx(domain: str) -> List[str]:
     return [str(r.exchange).rstrip(".") for r in records if str(r.exchange) not in (".", "")]
 
 
-def public_address(host: str) -> Optional[str]:
-    """An IP for host, or None if it does not resolve or any address is private, loopback or reserved."""
+def public_addresses(host: str) -> List[str]:
+    """IPs for host; empty if it does not resolve or any address is private, loopback or reserved."""
     try:
         infos = socket.getaddrinfo(host, 25, type=socket.SOCK_STREAM)
     except (OSError, UnicodeError):
+        return []
+    addresses = list(dict.fromkeys(info[4][0] for info in infos))
+    if not all(ipaddress.ip_address(a.split("%")[0]).is_global for a in addresses):
+        return []
+    return addresses
+
+
+def _rcpt_code(address: str, email: str) -> Optional[str]:
+    """RCPT TO reply code from one server, or None if it was unreachable or refused our sender."""
+    try:
+        with smtplib.SMTP(address, 25, timeout=SMTP_TIMEOUT_SECONDS) as server:
+            server.helo(SMTP_HELO_HOST)
+            mail_code, _ = server.mail(f"verify@{SMTP_HELO_HOST}")
+            if not 200 <= mail_code < 300:
+                return None
+            code, _ = server.rcpt(email)
+            return str(code)
+    except (smtplib.SMTPException, socket.timeout, OSError):
         return None
-    addresses = [info[4][0] for info in infos]
-    if not addresses or not all(ipaddress.ip_address(a.split("%")[0]).is_global for a in addresses):
-        return None
-    return addresses[0]
 
 
 def smtp_check(email: str, mx_hosts: List[str]) -> str:
     """RCPT TO reply code from the first reachable MX host, or 'unavailable'."""
     for host in mx_hosts:
         # MX hosts are chosen by whoever owns the domain; never let them point us at internal services.
-        address = public_address(host)
-        if address is None:
-            continue
-        try:
-            with smtplib.SMTP(address, 25, timeout=SMTP_TIMEOUT_SECONDS) as server:
-                server.helo(SMTP_HELO_HOST)
-                mail_code, _ = server.mail(f"verify@{SMTP_HELO_HOST}")
-                if not 200 <= mail_code < 300:
-                    continue  # the server refused us, not the mailbox
-                code, _ = server.rcpt(email)
-                return str(code)
-        except (smtplib.SMTPException, socket.timeout, OSError):
-            continue
+        for address in public_addresses(host):
+            code = _rcpt_code(address, email)
+            if code:
+                return code
     return SMTP_UNAVAILABLE
 
 
