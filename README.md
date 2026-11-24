@@ -1,7 +1,7 @@
 # Email Validation API 🚀
 
-[![Live](https://img.shields.io/badge/Live-brightgreen)](https://verify-mail.rabahdj.online)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.115-blue?logo=fastapi)](https://fastapi.tiangolo.com)
+[![CI](https://github.com/rabahdj2002/Email-Validation-API/actions/workflows/ci.yml/badge.svg)](https://github.com/rabahdj2002/Email-Validation-API/actions/workflows/ci.yml)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.162-blue?logo=fastapi)](https://fastapi.tiangolo.com)
 [![RapidAPI](https://img.shields.io/badge/RapidAPI-listed-0055DA)](https://rapidapi.com/rabahdjebbes6-VpFXFzqdF1R/api/email-validation-api32)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
@@ -25,7 +25,9 @@ Use it to block fake and throwaway sign-ups, clean mailing lists and reduce boun
 | SMTP (`full` mode) | Asks the mail server whether the mailbox exists | +0.2 |
 | Disposable | Flags known throwaway domains (Mailinator, YOPmail, …) | score set to 0 |
 
-An address is `valid` when its score is **≥ 0.6**.
+An address is `valid` when its score is **≥ 0.6**. If the mail server rejects the mailbox (5xx), the score is capped at 0.4. If no mail server can be reached on port 25 (many cloud hosts block it), `smtp` is `"unavailable"` and the basic score stands.
+
+`suggestion` proposes a fix for common domain typos, e.g. `ana@gmial.com` → `gmail.com`.
 
 ## 📡 Usage
 
@@ -47,7 +49,7 @@ curl -X POST https://verify-mail.rabahdj.online/validate \
   "score": 1.0,
   "checks": {
     "syntax": true,
-    "mx": ["mx1.example.com."],
+    "mx": ["mx1.example.com"],
     "smtp": "250",
     "disposable": false
   },
@@ -66,9 +68,37 @@ python main.py            # serves on http://localhost:8001
 
 Open http://localhost:8001/docs for the interactive API docs.
 
+Or with Docker:
+
+```bash
+docker build -t email-validation-api .
+docker run -p 8001:8001 email-validation-api
+```
+
+## 🧪 Tests
+
+The tests cover scoring, every check, SMTP fallback across MX hosts, DNS failures, input validation and typo suggestions. DNS and SMTP are mocked, so they run offline. CI runs lint, the tests and a Docker build on every push.
+
+```bash
+pip install -r requirements.txt -r requirements-dev.txt
+ruff check .
+pytest -q
+```
+
+## ☁️ Deploy for free
+
+The repo includes a [Render](https://render.com) blueprint (`render.yaml`). On Render, choose **New → Blueprint**, pick this repository and deploy. Health checks use `/ping`, and the port comes from `$PORT`.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PORT` | `8001` | HTTP port |
+| `DNS_TIMEOUT_SECONDS` | `3` | MX lookup timeout |
+| `SMTP_TIMEOUT_SECONDS` | `10` | Per-server SMTP timeout |
+| `SMTP_HELO_HOST` | `email-validation-api.local` | Name used in HELO/MAIL FROM (set to your domain) |
+
 ## 🧱 Tech stack
 
-Python · FastAPI · Pydantic · dnspython · smtplib · Uvicorn
+Python · FastAPI · Pydantic · dnspython · smtplib · Uvicorn · pytest · Docker · GitHub Actions
 
 ## 👨‍💻 Author
 
